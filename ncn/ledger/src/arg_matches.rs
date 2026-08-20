@@ -435,16 +435,13 @@ pub fn set_ledger_tool_arg_matches(
         full_snapshots_archives_dir.into(),
         "--incremental-snapshot-archive-path".into(),
         incremental_snapshots_archives_dir.into(),
-        // "--accounts".into(),
-        // account_paths
-        //     .iter()
-        //     .map(|p| p.to_string_lossy().to_string())
-        //     .collect::<Vec<_>>()
-        //     .join(",")
-        //     .into(),
     ];
 
-    *arg_matches = app.get_matches_from(args);
+    let matches = app.get_matches_from(args);
+    *arg_matches = matches
+        .subcommand_matches("create-snapshot")
+        .expect("create-snapshot subcommand is always supplied")
+        .clone();
 }
 
 /// Returns the arguments that configure AccountsDb
@@ -532,6 +529,29 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
             .hidden(hidden_unless_forced()),
     ]
     .into_boxed_slice()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omits_custom_account_paths_for_secondary_access() {
+        let mut matches = ArgMatches::new();
+        set_ledger_tool_arg_matches(
+            &mut matches,
+            PathBuf::from("full-snapshots"),
+            PathBuf::from("incremental-snapshots"),
+            vec![PathBuf::from("accounts-a"), PathBuf::from("accounts-b")],
+        );
+
+        assert_eq!(matches.value_of("account_paths"), None);
+        assert_eq!(matches.value_of("snapshots"), Some("full-snapshots"));
+        assert_eq!(
+            matches.value_of("incremental_snapshot_archive_path"),
+            Some("incremental-snapshots")
+        );
+    }
 }
 
 // For our current version of CLAP, the value passed to Arg::default_value()
