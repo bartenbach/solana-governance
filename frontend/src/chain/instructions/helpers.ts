@@ -1,4 +1,4 @@
-import { PublicKey, Connection, Keypair } from "@solana/web3.js";
+import { PublicKey, Connection, Keypair, Transaction } from "@solana/web3.js";
 import { AnchorProvider, Program, BN } from "@coral-xyz/anchor";
 import idl from "@/chain/idl/svmgov_program.json";
 import govV1Idl from "@/chain/idl/gov-v1.json";
@@ -13,6 +13,62 @@ import { AnchorWallet } from "@solana/wallet-adapter-react";
 import { SvmgovProgram, GovV1 } from "../types";
 import { RPC_URLS } from "@/contexts/EndpointContext";
 import { DEFAULT_NCN_API_URL, fetchNcnJson } from "@/lib/ncnApi";
+
+/** Thrown when the wallet cannot provide the signature required by a transaction. */
+export class WalletSigningError extends Error {
+  name = "WalletSigningError";
+}
+
+/**
+ * Signs a transaction and verifies that the returned signature is for the account that built it.
+ *
+ * A wallet can return a transaction signed by a different account, or no signature at all. This
+ * guard prevents either response from reaching web3.js serialization, where it would otherwise
+ * surface as an opaque "missing signature" error. It cannot observe later React wallet-provider
+ * updates; it validates only the transaction returned by the wallet.
+ *
+ * @param wallet - Wallet adapter used to sign the transaction.
+ * @param transaction - Fully constructed transaction with a fee payer and recent blockhash.
+ * @param expectedSigner - Account captured when the transaction was constructed.
+ * @returns The transaction signed by the expected account.
+ * @throws {WalletSigningError} If the returned transaction is unsigned, invalid, or signed by a
+ * different account.
+ */
+export async function signTransactionForWallet(
+  wallet: AnchorWallet,
+  transaction: Transaction,
+  expectedSigner: PublicKey
+): Promise<Transaction> {
+  const signedTransaction = await wallet.signTransaction(transaction);
+
+  const expectedSignature = signedTransaction.signatures.find(({ publicKey }) =>
+    publicKey.equals(expectedSigner)
+  );
+  const unexpectedSignature = signedTransaction.signatures.find(
+    ({ publicKey, signature }) =>
+      signature !== null && !publicKey.equals(expectedSigner)
+  );
+
+  if (!expectedSignature?.signature && unexpectedSignature) {
+    throw new WalletSigningError(
+      "Your wallet signed with a different account than the one that started this vote. Reconnect the original account and try again."
+    );
+  }
+
+  if (!expectedSignature?.signature) {
+    throw new WalletSigningError(
+      "Your wallet did not sign the transaction with the connected account. Reconnect the account that started this vote and try again."
+    );
+  }
+
+  if (!signedTransaction.verifySignatures()) {
+    throw new WalletSigningError(
+      "Your wallet returned an invalid transaction signature. Reconnect the account that started this vote and try again."
+    );
+  }
+
+  return signedTransaction;
+}
 
 // PDA derivation functions (based on test implementation)
 export function deriveProposalPda(

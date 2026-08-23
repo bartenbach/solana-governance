@@ -135,18 +135,30 @@ describe("castVoteOverride", () => {
     };
   }
 
-  const mockSignTransaction = jest.fn(async (transaction: Transaction) => {
-    void transaction;
-    return { serialize: () => Buffer.alloc(0) };
-  });
-  const wallet = {
+  const mockSignTransaction = jest.fn();
+  const walletState = {
     publicKey: new PublicKey(SIGNER),
     signTransaction: mockSignTransaction,
     signAllTransactions: jest.fn(),
-  } as unknown as AnchorWallet;
+  };
+  const wallet = walletState as unknown as AnchorWallet;
+
+  function signedTransactionResponse(
+    signatures: { publicKey: PublicKey; signature: Buffer | null }[] = [
+      { publicKey: new PublicKey(SIGNER), signature: Buffer.alloc(64) },
+    ]
+  ): Transaction {
+    return {
+      signatures,
+      verifySignatures: () => true,
+      serialize: () => Buffer.alloc(0),
+    } as unknown as Transaction;
+  }
 
   beforeEach(() => {
     jest.clearAllMocks();
+    walletState.publicKey = new PublicKey(SIGNER);
+    mockSignTransaction.mockResolvedValue(signedTransactionResponse());
     mockCreateProgramWithWallet.mockReturnValue(buildFakeProgram());
     mockCreateGovV1ProgramWithWallet.mockReturnValue(buildFakeGovV1Program());
     mockComputeProofCloseTimestamp.mockResolvedValue(2_000_000_000);
@@ -361,5 +373,33 @@ describe("castVoteOverride", () => {
     );
     expect(mockSignTransaction).toHaveBeenCalledTimes(1);
     expect(mockSendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an unsigned wallet response without submitting the transaction", async () => {
+    mockSignTransaction.mockResolvedValueOnce(
+      signedTransactionResponse([
+        { publicKey: new PublicKey(SIGNER), signature: null },
+      ])
+    );
+
+    await expect(castVoteOverride(params, blockchainParams)).rejects.toThrow(
+      /wallet did not sign the transaction/i
+    );
+    expect(mockSendRawTransaction).not.toHaveBeenCalled();
+  });
+
+  it("reports a returned signature from a different account", async () => {
+    const otherAccount = new PublicKey(keyFromByte(12));
+    mockSignTransaction.mockResolvedValueOnce(
+      signedTransactionResponse([
+        { publicKey: new PublicKey(SIGNER), signature: null },
+        { publicKey: otherAccount, signature: Buffer.alloc(64) },
+      ])
+    );
+
+    await expect(castVoteOverride(params, blockchainParams)).rejects.toThrow(
+      /signed with a different account/i
+    );
+    expect(mockSendRawTransaction).not.toHaveBeenCalled();
   });
 });
