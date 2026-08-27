@@ -37,6 +37,26 @@ export type QuorumStatus =
       isMet: boolean;
     };
 
+/** Percentages for the three recorded vote options. */
+export type VotePercentageBreakdown =
+  | { known: false }
+  | {
+      known: true;
+      forPercent: number;
+      againstPercent: number;
+      abstainPercent: number;
+    };
+
+/** The distinct percentage views shown for a proposal. */
+export interface ProposalVoteStats {
+  /** Overall participation measured against the frozen snapshot stake. */
+  quorum: QuorumStatus;
+  /** Each option measured against all votes cast. */
+  voteShare: VotePercentageBreakdown;
+  /** Each option measured against the frozen snapshot stake. */
+  stakeShare: VotePercentageBreakdown;
+}
+
 export function computeQuorum({
   forLamports,
   againstLamports,
@@ -60,6 +80,45 @@ export function computeQuorum({
     isMet:
       participatingLamports >=
       (totalActiveStake * QUORUM_NUMERATOR) / QUORUM_DENOMINATOR,
+  };
+}
+
+/**
+ * Computes the participation and vote-percentage views shown for a proposal.
+ *
+ * Quorum and stake share use the frozen snapshot stake. Vote share uses only
+ * recorded votes, so it remains available when snapshot metadata is unavailable.
+ */
+export function computeProposalVoteStats(
+  input: QuorumInput,
+): ProposalVoteStats {
+  const quorum = computeQuorum(input);
+  const participatingLamports =
+    input.forLamports + input.againstLamports + input.abstainLamports;
+
+  const voteShare: VotePercentageBreakdown =
+    participatingLamports > 0
+      ? {
+          known: true,
+          forPercent: (input.forLamports / participatingLamports) * 100,
+          againstPercent: (input.againstLamports / participatingLamports) * 100,
+          abstainPercent: (input.abstainLamports / participatingLamports) * 100,
+        }
+      : { known: false };
+
+  const stakeShare: VotePercentageBreakdown = quorum.known
+    ? {
+        known: true,
+        forPercent: (input.forLamports / quorum.totalActiveStake) * 100,
+        againstPercent: (input.againstLamports / quorum.totalActiveStake) * 100,
+        abstainPercent: (input.abstainLamports / quorum.totalActiveStake) * 100,
+      }
+    : { known: false };
+
+  return {
+    quorum,
+    voteShare,
+    stakeShare,
   };
 }
 
