@@ -7,8 +7,8 @@
 //! If quorum is not met the outcome is inconclusive, not a fail.
 //!
 //! The snapshot total is required for quorum. It is taken from the proposal's
-//! own snapshot (Art. IV.2), never a live cluster sum. `/meta` only serves the
-//! newest snapshot, so a total from a different slot is refused.
+//! own snapshot (Art. IV.2), never a live cluster sum. `/meta?slot=` returns
+//! that snapshot's total; a total from a different slot is refused.
 
 use anchor_client::solana_sdk::native_token::LAMPORTS_PER_SOL;
 use comfy_table::modifiers::UTF8_ROUND_CORNERS;
@@ -61,9 +61,8 @@ impl DenominatorError {
 
 /// The total to measure quorum against, or why it cannot be established.
 ///
-/// `/meta` serves only the newest snapshot. A proposal votes against the one
-/// frozen at activation, so a total from any other slot is a different stake
-/// distribution and must not be used.
+/// `/meta?slot=` is the proposal's own snapshot. A total from any other slot
+/// is a different stake distribution and must not be used.
 pub fn resolve_quorum_denominator(
     meta: Option<&SnapshotTotalSource>,
     proposal_snapshot_slot: u64,
@@ -141,32 +140,42 @@ pub enum ProposalOutcome {
 }
 
 impl ProposalOutcome {
-    pub fn label(self) -> &'static str {
-        match self {
-            ProposalOutcome::Unknown => "Unknown (snapshot total unavailable)",
-            ProposalOutcome::Inconclusive => "Inconclusive (quorum not met)",
-            ProposalOutcome::Passing => "Passing",
-            ProposalOutcome::Failing => "Failing",
+    /// `settled` is true once voting can no longer change the result
+    /// (finalized, or the voting window has closed). SGP-0001's results are
+    /// then Passed / Failed; while the vote is open they are Passing / Failing.
+    /// Inconclusive is the quorum miss in either case — it is not a fail.
+    pub fn label(self, settled: bool) -> &'static str {
+        match (self, settled) {
+            (ProposalOutcome::Unknown, _) => "Unknown (snapshot total unavailable)",
+            (ProposalOutcome::Inconclusive, _) => "Inconclusive (quorum not met)",
+            (ProposalOutcome::Passing, false) => "Passing",
+            (ProposalOutcome::Passing, true) => "Passed",
+            (ProposalOutcome::Failing, false) => "Failing",
+            (ProposalOutcome::Failing, true) => "Failed",
         }
     }
 
     /// Compact label for `list-proposals`. Unknown is a dash so a support-phase
     /// row does not look like a failed vote.
-    pub fn short_label(self) -> &'static str {
-        match self {
-            ProposalOutcome::Unknown => "—",
-            ProposalOutcome::Inconclusive => "Inconclusive",
-            ProposalOutcome::Passing => "Passing",
-            ProposalOutcome::Failing => "Failing",
+    pub fn short_label(self, settled: bool) -> &'static str {
+        match (self, settled) {
+            (ProposalOutcome::Unknown, _) => "—",
+            (ProposalOutcome::Inconclusive, _) => "Inconclusive",
+            (ProposalOutcome::Passing, false) => "Passing",
+            (ProposalOutcome::Passing, true) => "Passed",
+            (ProposalOutcome::Failing, false) => "Failing",
+            (ProposalOutcome::Failing, true) => "Failed",
         }
     }
 
-    pub fn id(self) -> &'static str {
-        match self {
-            ProposalOutcome::Unknown => "unknown",
-            ProposalOutcome::Inconclusive => "inconclusive",
-            ProposalOutcome::Passing => "passing",
-            ProposalOutcome::Failing => "failing",
+    pub fn id(self, settled: bool) -> &'static str {
+        match (self, settled) {
+            (ProposalOutcome::Unknown, _) => "unknown",
+            (ProposalOutcome::Inconclusive, _) => "inconclusive",
+            (ProposalOutcome::Passing, false) => "passing",
+            (ProposalOutcome::Passing, true) => "passed",
+            (ProposalOutcome::Failing, false) => "failing",
+            (ProposalOutcome::Failing, true) => "failed",
         }
     }
 }
@@ -273,7 +282,7 @@ fn participation_bar(participation_percent: f64) -> String {
 
 /// Lines above the For/Against/Abstain table. Unit-tested so the website card
 /// and the CLI stay aligned without an RPC.
-pub fn breakdown_summary_lines(tally: &VoteTally) -> Vec<String> {
+pub fn breakdown_summary_lines(tally: &VoteTally, settled: bool) -> Vec<String> {
     let quorum = compute_quorum(tally);
     let outcome = compute_outcome(tally);
     let participating = tally.participating_lamports();
@@ -310,13 +319,16 @@ pub fn breakdown_summary_lines(tally: &VoteTally) -> Vec<String> {
             format_percent(percent(tally.for_lamports, participating))
         ));
     }
-    lines.push(format!("Outcome:                     {}", outcome.label()));
+    lines.push(format!(
+        "Outcome:                     {}",
+        outcome.label(settled)
+    ));
     lines
 }
 
-pub fn print_vote_breakdown(tally: &VoteTally, terminal_width: u16) {
+pub fn print_vote_breakdown(tally: &VoteTally, terminal_width: u16, settled: bool) {
     println!("\nVote breakdown (SGP-0001)");
-    for line in breakdown_summary_lines(tally) {
+    for line in breakdown_summary_lines(tally, settled) {
         println!("  {line}");
     }
 
@@ -583,12 +595,15 @@ mod tests {
 
     #[test]
     fn summary_names_quorum_and_outcome() {
-        let lines = breakdown_summary_lines(&tally(
-            NETWORK_STAKE / 2,
-            NETWORK_STAKE / 10,
-            0,
-            known(NETWORK_STAKE),
-        ));
+        let lines = breakdown_summary_lines(
+            &tally(
+                NETWORK_STAKE / 2,
+                NETWORK_STAKE / 10,
+                0,
+                known(NETWORK_STAKE),
+            ),
+            false,
+        );
         assert!(lines.iter().any(|l| l.contains("quorum met")));
         assert!(lines.iter().any(|l| l.contains("Passing")));
         assert!(lines.iter().any(|l| l.contains("1/3 needed")));
@@ -596,8 +611,23 @@ mod tests {
     }
 
     #[test]
+    fn settled_summary_uses_past_tense() {
+        let lines = breakdown_summary_lines(
+            &tally(
+                NETWORK_STAKE / 2,
+                NETWORK_STAKE / 10,
+                0,
+                known(NETWORK_STAKE),
+            ),
+            true,
+        );
+        assert!(lines.iter().any(|l| l.contains("Passed")));
+        assert!(!lines.iter().any(|l| l.contains("Passing")));
+    }
+
+    #[test]
     fn summary_without_a_total_does_not_pretend_quorum_failed() {
-        let lines = breakdown_summary_lines(&tally(1, 0, 0, Err(DenominatorError::NoMeta)));
+        let lines = breakdown_summary_lines(&tally(1, 0, 0, Err(DenominatorError::NoMeta)), false);
         assert!(
             lines
                 .iter()
@@ -616,17 +646,30 @@ mod tests {
             0,
             known(NETWORK_STAKE),
         ));
-        assert_eq!(passing.outcome.short_label(), "Passing");
-        assert_eq!(passing.outcome.id(), "passing");
+        assert_eq!(passing.outcome.short_label(false), "Passing");
+        assert_eq!(passing.outcome.id(false), "passing");
+        assert_eq!(passing.outcome.short_label(true), "Passed");
+        assert_eq!(passing.outcome.id(true), "passed");
         assert_eq!(passing.for_stake, "200.00M SOL");
         assert_eq!(passing.against_stake, "40.00M SOL");
         assert_eq!(passing.abstain_stake, "0.00 SOL");
 
         let unknown = list_vote_summary(&tally(1, 0, 0, Err(DenominatorError::Unactivated)));
-        assert_eq!(unknown.outcome.short_label(), "—");
-        assert_eq!(unknown.outcome.id(), "unknown");
+        assert_eq!(unknown.outcome.short_label(false), "—");
+        assert_eq!(unknown.outcome.id(false), "unknown");
 
         let no_quorum = list_vote_summary(&tally(NETWORK_STAKE / 10, 0, 0, known(NETWORK_STAKE)));
-        assert_eq!(no_quorum.outcome.short_label(), "Inconclusive");
+        assert_eq!(no_quorum.outcome.short_label(true), "Inconclusive");
+        assert_eq!(no_quorum.outcome.id(true), "inconclusive");
+
+        let failing = list_vote_summary(&tally(
+            NETWORK_STAKE * 2 / 3 - ONE_SOL,
+            NETWORK_STAKE / 3 + ONE_SOL,
+            0,
+            known(NETWORK_STAKE),
+        ));
+        assert_eq!(failing.outcome.short_label(false), "Failing");
+        assert_eq!(failing.outcome.short_label(true), "Failed");
+        assert_eq!(failing.outcome.id(true), "failed");
     }
 }

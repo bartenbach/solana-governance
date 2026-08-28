@@ -58,6 +58,9 @@ pub struct VoteRecord {
     pub for_votes_bp: u64,
     pub against_votes_bp: u64,
     pub abstain_votes_bp: u64,
+    /// Snapshot stake attached to this vote. For validators this is
+    /// `Vote.stake` minus `Vote.override_lamports`, matching the weight that
+    /// actually votes with the validator's split.
     pub stake_lamports: u64,
     pub timestamp: i64,
 }
@@ -71,7 +74,7 @@ impl VoteRecord {
             for_votes_bp: vote.for_votes_bp,
             against_votes_bp: vote.against_votes_bp,
             abstain_votes_bp: vote.abstain_votes_bp,
-            stake_lamports: vote.stake,
+            stake_lamports: vote.stake.saturating_sub(vote.override_lamports),
             timestamp: vote.vote_timestamp,
         }
     }
@@ -369,6 +372,14 @@ mod tests {
         assert_eq!(record.abstain_votes_bp, 1_000);
         assert_eq!(record.stake_lamports, 42);
         assert_eq!(record.timestamp, 1_700_000_000);
+    }
+
+    #[test]
+    fn from_vote_excludes_overridden_stake() {
+        let mut vote = sample_vote(pubkey(7));
+        vote.stake = 100;
+        vote.override_lamports = 30;
+        assert_eq!(VoteRecord::from_vote(&vote).stake_lamports, 70);
     }
 
     #[test]

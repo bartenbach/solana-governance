@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use anchor_client::solana_account_decoder::UiAccountEncoding;
 use anchor_client::solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
@@ -90,12 +90,18 @@ pub async fn get_proposal(
     let proposal_acc = program.account::<Proposal>(proposal_pubkey).await?;
     let global_config = fetch_global_config(&program).await?;
     let vote_records = fetch_vote_records(&rpc, &program.id(), &proposal_pubkey).await;
-    let snapshot_source = load_snapshot_source(&network).await;
+    let snapshots =
+        load_snapshot_sources(&network, std::iter::once(proposal_acc.snapshot_slot)).await;
 
     print_proposal_detail(proposal_id, &proposal_acc, current_epoch, &global_config);
 
     let width = detect_terminal_width().unwrap_or(200);
-    print_vote_breakdown(&vote_tally(&proposal_acc, snapshot_source.as_ref()), width);
+    let settled = ProposalPhase::new(
+        &PhaseInputs::new(&proposal_acc, &global_config),
+        current_epoch,
+    )
+    .vote_is_settled();
+    print_vote_breakdown(&vote_tally(&proposal_acc, &snapshots), width, settled);
 
     match vote_records {
         Ok(mut records) => {
@@ -279,7 +285,8 @@ struct ProposalOutput {
     voting: bool,
     finalized: bool,
     creation_timestamp: i64,
-    /// SGP-0001 outcome: `passing`, `failing`, `inconclusive`, or `unknown`.
+    /// SGP-0001 outcome. While voting is open: `passing` / `failing`.
+    /// Once settled: `passed` / `failed`. Also `inconclusive` or `unknown`.
     outcome: String,
 }
 
@@ -384,21 +391,26 @@ pub async fn list_proposals(
         return Ok(());
     }
 
-    let snapshot_source = load_snapshot_source(&network).await;
+    let snapshots = load_snapshot_sources(
+        &network,
+        proposals.iter().map(|(_, proposal)| proposal.snapshot_slot),
+    )
+    .await;
 
     // Output in JSON format if requested
     if json_output {
         let json_proposals: Vec<ProposalOutput> = proposals
             .iter()
             .map(|(pubkey, proposal)| {
-                let tally = vote_tally(proposal, snapshot_source.as_ref());
+                let tally = vote_tally(proposal, &snapshots);
+                let phase =
+                    ProposalPhase::new(&PhaseInputs::new(proposal, &global_config), current_epoch);
                 ProposalOutput {
                     id: pubkey.to_string(),
                     title: proposal.title.clone(),
                     description: proposal.description.clone(),
                     author: proposal.author.to_string(),
-                    status: get_proposal_status(proposal, current_epoch, &global_config)
-                        .to_string(),
+                    status: phase.id().to_string(),
                     index: proposal.index,
                     creation_epoch: proposal.creation_epoch,
                     start_epoch: proposal.start_epoch,
@@ -413,42 +425,60 @@ pub async fn list_proposals(
                     voting: proposal.voting,
                     finalized: proposal.finalized,
                     creation_timestamp: proposal.creation_timestamp,
-                    outcome: compute_outcome(&tally).id().to_string(),
+                    outcome: compute_outcome(&tally)
+                        .id(phase.vote_is_settled())
+                        .to_string(),
                 }
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&json_proposals)?);
     } else {
-        print_proposals_table(
-            &proposals,
-            current_epoch,
-            &global_config,
-            snapshot_source.as_ref(),
-        );
+        print_proposals_table(&proposals, current_epoch, &global_config, &snapshots);
     }
 
     Ok(())
 }
 
-async fn load_snapshot_source(network: &str) -> Option<SnapshotTotalSource> {
-    match api_helpers::get_snapshot_meta(network).await {
-        Ok(meta) => Some(SnapshotTotalSource {
-            slot: meta.slot,
-            total_active_stake: meta.total_active_stake,
-        }),
-        Err(e) => {
-            log::warn!("Could not load snapshot meta for quorum: {e}");
-            None
+async fn load_snapshot_sources(
+    network: &str,
+    slots: impl IntoIterator<Item = u64>,
+) -> HashMap<u64, SnapshotTotalSource> {
+    let mut sources = HashMap::new();
+    let mut needed: Vec<u64> = slots.into_iter().filter(|slot| *slot != 0).collect();
+    needed.sort_unstable();
+    needed.dedup();
+
+    for slot in needed {
+        match api_helpers::get_snapshot_meta(network, Some(slot)).await {
+            Ok(meta) => {
+                // Keyed by the slot the API actually returned, never the one
+                // we asked for, so an operator that ignores `?slot=` cannot
+                // attach the newest total to an older proposal.
+                sources.insert(
+                    meta.slot,
+                    SnapshotTotalSource {
+                        slot: meta.slot,
+                        total_active_stake: meta.total_active_stake,
+                    },
+                );
+            }
+            Err(e) => {
+                log::debug!("Could not load snapshot meta for slot {slot}: {e}");
+            }
         }
     }
+    sources
 }
 
-fn vote_tally(proposal: &Proposal, snapshot: Option<&SnapshotTotalSource>) -> VoteTally {
+fn vote_tally(proposal: &Proposal, snapshots: &HashMap<u64, SnapshotTotalSource>) -> VoteTally {
     VoteTally {
         for_lamports: proposal.for_votes_lamports,
         against_lamports: proposal.against_votes_lamports,
         abstain_lamports: proposal.abstain_votes_lamports,
-        total_active_stake: resolve_quorum_denominator(snapshot, proposal.snapshot_slot),
+        total_active_stake: resolve_quorum_denominator(
+            snapshots.get(&proposal.snapshot_slot),
+            proposal.snapshot_slot,
+        ),
     }
 }
 
@@ -456,7 +486,7 @@ fn print_proposals_table(
     proposals: &[(Pubkey, Proposal)],
     current_epoch: u64,
     config: &GlobalConfig,
-    snapshot: Option<&SnapshotTotalSource>,
+    snapshots: &HashMap<u64, SnapshotTotalSource>,
 ) {
     let mut table = Table::new();
     table
@@ -477,8 +507,8 @@ fn print_proposals_table(
     }
 
     for (pubkey, proposal) in proposals {
-        let status = ProposalPhase::new(&PhaseInputs::new(proposal, config), current_epoch).label();
-        let votes = list_vote_summary(&vote_tally(proposal, snapshot));
+        let phase = ProposalPhase::new(&PhaseInputs::new(proposal, config), current_epoch);
+        let votes = list_vote_summary(&vote_tally(proposal, snapshots));
 
         // Truncate title if too long
         let title = if proposal.title.chars().count() > 32 {
@@ -491,8 +521,8 @@ fn print_proposals_table(
         table.add_row(vec![
             Cell::new(pubkey.to_string()),
             Cell::new(title),
-            Cell::new(status),
-            Cell::new(votes.outcome.short_label()),
+            Cell::new(phase.label()),
+            Cell::new(votes.outcome.short_label(phase.vote_is_settled())),
             Cell::new(&votes.for_stake).set_alignment(CellAlignment::Right),
             Cell::new(&votes.against_stake).set_alignment(CellAlignment::Right),
             Cell::new(&votes.abstain_stake).set_alignment(CellAlignment::Right),

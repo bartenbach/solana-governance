@@ -62,10 +62,10 @@ After the proposal fields, the command prints a **Vote breakdown** matching the 
 
 | Line | Description |
 |---|---|
-| Snapshot stake | Total active stake in the proposal's snapshot (Art. IV.2). Omitted when `/meta` is for a different slot |
+| Snapshot stake | Total active stake in the proposal's snapshot (Art. IV.2). The CLI asks `/meta` for that slot. Omitted if the operator no longer stores it |
 | Participation | `(For + Against + Abstain) / snapshot stake`. Quorum is **1/3** of snapshot stake (SGP-0001 Art. IV.3) |
 | Supermajority | `For / (For + Against + Abstain)`. A pass needs **2/3** of participating stake For (Art. IV.4 as stated in the FAQ) |
-| Outcome | `Passing`, `Failing`, `Inconclusive (quorum not met)`, or `Unknown` if the snapshot total is unavailable |
+| Outcome | `Passing` / `Failing` while voting is open; `Passed` / `Failed` once finalized; `Inconclusive (quorum not met)`; or `Unknown` if the snapshot total is unavailable |
 | For / Against / Abstain | Stake in SOL, share of votes cast, and share of snapshot stake |
 
 | Column | Description |
@@ -73,7 +73,7 @@ After the proposal fields, the command prints a **Vote breakdown** matching the 
 | Voter | Validator identity (voting wallet) or staker delegator |
 | Type | `Validator` or `Staker` |
 | Stake Account | Stake account used for an override; `—` for validator votes |
-| Stake | Snapshot stake (SOL) attached to this vote |
+| Stake | Effective voting weight (SOL). For a validator this is snapshot stake minus any staker overrides, so the column does not double-count |
 | For / Against / Abstain | Vote split in percent (basis points / 100) |
 | Date | When the vote (or override) was last written |
 

@@ -267,7 +267,7 @@ enum Commands {
     #[command(
         about = "List all proposals",
         long_about = "This command retrieves and displays all governance proposals from the Solana Validator Governance program. \
-                      Table rows include status, SGP-0001 outcome (Passing / Failing / Inconclusive), and For / Against / Abstain stake. \
+                      Table rows include status, SGP-0001 outcome (Passing / Failing while voting, Passed / Failed once finalized, or Inconclusive), and For / Against / Abstain stake. \
                       An optional RPC URL can be provided to connect to the chain; otherwise, a default URL is used.\n\n\
                       Examples:\n\
                       $ svmgov list-proposals\n\

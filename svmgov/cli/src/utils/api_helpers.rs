@@ -321,11 +321,11 @@ pub async fn get_stake_account_proof(
     Ok(proof)
 }
 
-/// Snapshot metadata from `GET /meta?network=...`.
+/// Snapshot metadata from `GET /meta?network=...` (newest) or
+/// `GET /meta?network=...&slot=...` (that snapshot).
 ///
-/// `/meta` serves only the newest snapshot. A proposal votes against the slot
-/// frozen at activation, so callers must refuse a total whose `slot` does not
-/// match the proposal's `snapshot_slot`.
+/// A proposal votes against the slot frozen at activation, so callers must
+/// refuse a total whose `slot` does not match the proposal's `snapshot_slot`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetaResponse {
     pub network: String,
@@ -339,10 +339,14 @@ pub struct SnapshotMetaResponse {
     pub total_active_stake: Option<u64>,
 }
 
-/// Fetch the newest snapshot meta for `network`.
-pub async fn get_snapshot_meta(network: &str) -> Result<SnapshotMetaResponse> {
+/// Fetch snapshot meta for `network`. `slot` selects a historical snapshot;
+/// `None` is the newest.
+pub async fn get_snapshot_meta(network: &str, slot: Option<u64>) -> Result<SnapshotMetaResponse> {
     let base_url = get_api_base_url()?;
-    let url = format!("{}/meta?network={}", base_url, network);
+    let url = match slot {
+        Some(slot) => format!("{base_url}/meta?network={network}&slot={slot}"),
+        None => format!("{base_url}/meta?network={network}"),
+    };
 
     log::debug!("Fetching snapshot meta from: {}", url);
 
